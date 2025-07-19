@@ -1,0 +1,16 @@
+[package]
+name = "train-checker"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.98"
+chrono = "0.4"
+gtfs-structures = "0.44.0"
+prost-types = "0.13"
+prost = "0.13"
+reqwest = { version = "0.12.22", features = ["json"] }
+tokio = { version = "1.46.1", features = ["full"] }
+
+[build-dependencies]
+prost-build = "0.13"
