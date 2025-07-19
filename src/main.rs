@@ -1,4 +1,5 @@
 use anyhow::Result;
+use chrono::{Duration as ChronoDuration, Utc as ChronoUtc};
 use prost::Message;
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
@@ -10,14 +11,11 @@ use subway::FeedMessage;
 // This file includes most, but not all, service changes for the next seven calendar days.
 // Generally, the 'simpler' the service change, the more likely it will not be included.
 // Beyond that period, service changes will not be included. It is updated hourly.
-const SUPPLEMENTED_GTFS_URL: &str = "https://rrgtfsfeeds.s3.amazonaws.com/gtfs_subway.zip";
+const _SUPPLEMENTED_GTFS_URL: &str = "https://rrgtfsfeeds.s3.amazonaws.com/gtfs_supplemented.zip";
 
-async fn fetch_supplemented_gtfs() -> Result<gtfs_structures::Gtfs> {
-    println!("Fetching latest GTFS data...");
-    let gtfs = gtfs_structures::Gtfs::from_url_async(SUPPLEMENTED_GTFS_URL).await?;
-    gtfs.print_stats();
-    Ok(gtfs)
-}
+// This file represents the "normal" subway schedule and does not include most temporary service
+// changes, though some long term service changes may be included. It is typically updated a few times a year.
+const GTFS_URL: &str = "https://rrgtfsfeeds.s3.amazonaws.com/gtfs_subway.zip";
 
 // MTA GTFS-Realtime feed URLs. These endpoints require an API key.
 // The base URL is for the numbered lines (1, 2, 3, 4, 5, 6, 7)
@@ -30,6 +28,14 @@ const SUFFIX_JZ: &str = "jz";
 const SUFFIX_NQRW: &str = "nqrw";
 const SUFFIX_L: &str = "l";
 const SUFFIX_SIR: &str = "si";
+
+/// Fetches the GTFS data. This is used to get the list of stops and routes.
+async fn fetch_supplemented_gtfs() -> Result<gtfs_structures::Gtfs> {
+    println!("Fetching latest GTFS data...");
+    let gtfs = gtfs_structures::Gtfs::from_url_async(GTFS_URL).await?;
+    gtfs.print_stats();
+    Ok(gtfs)
+}
 
 /// Maps route IDs to their corresponding MTA realtime feed endpoints
 fn get_realtime_feeds_for_routes(routes: &HashSet<String>) -> Result<Vec<String>> {
@@ -224,8 +230,8 @@ async fn check_trains_at_stop(
     // Fetch realtime data from all required feeds
     let realtime_feeds = fetch_combined_realtime_data(feeds).await?;
 
-    let mut route_times: HashMap<String, i32> = HashMap::new();
-    let current_timestamp = chrono::Utc::now().timestamp();
+    let mut route_times: HashMap<String, Vec<i32>> = HashMap::new();
+    let current_timestamp = ChronoUtc::now().timestamp();
 
     // Process realtime data to find upcoming trains
     for feed in &realtime_feeds {
@@ -245,16 +251,10 @@ async fn check_trains_at_stop(
                                         if let Some(route_id) = &trip_update.trip.route_id {
                                             let route_name = route_id.clone();
 
-                                            match route_times.get(&route_name) {
-                                                None => {
-                                                    route_times.insert(route_name, time_diff);
-                                                }
-                                                Some(&existing_time) => {
-                                                    if time_diff < existing_time {
-                                                        route_times.insert(route_name, time_diff);
-                                                    }
-                                                }
-                                            }
+                                            route_times
+                                                .entry(route_name)
+                                                .or_insert_with(Vec::new)
+                                                .push(time_diff);
                                         }
                                     }
                                 }
@@ -269,19 +269,28 @@ async fn check_trains_at_stop(
     if route_times.is_empty() {
         println!("No upcoming trains found at this stop");
     } else {
-        let mut sorted_routes: Vec<_> = route_times.iter().collect();
-        sorted_routes.sort_by_key(|&(_, time)| time);
+        for (route_id, times) in &route_times {
+            // Sort times for this route and take the next 2
+            let mut sorted_times = times.clone();
+            sorted_times.sort();
+            let next_trains = sorted_times.iter().take(2);
 
-        for (route_id, &seconds) in sorted_routes {
-            let minutes = seconds / 60;
             if let Some(route) = gtfs.routes.get(route_id) {
-                println!(
-                    "{} Train: {} minutes",
-                    route.short_name.as_deref().unwrap_or(route_id),
-                    minutes
-                );
+                let route_name = route.short_name.as_deref().unwrap_or(route_id);
+                println!("{} Train:", route_name);
+
+                for (i, &seconds) in next_trains.enumerate() {
+                    let future_time = ChronoUtc::now() + ChronoDuration::seconds(seconds as i64);
+                    let human_time = chrono_humanize::HumanTime::from(future_time);
+                    println!("  {}: {}", i + 1, human_time);
+                }
             } else {
-                println!("Route {}: {} minutes", route_id, minutes);
+                println!("Route {}:", route_id);
+                for (i, &seconds) in next_trains.enumerate() {
+                    let future_time = ChronoUtc::now() + ChronoDuration::seconds(seconds as i64);
+                    let human_time = chrono_humanize::HumanTime::from(future_time);
+                    println!("  {}: {}", i + 1, human_time);
+                }
             }
         }
     }

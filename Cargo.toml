@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 anyhow = "1.0.98"
 chrono = "0.4"
+chrono-humanize = "0.2"
 gtfs-structures = "0.44.0"
 prost-types = "0.13"
 prost = "0.13"
