@@ -3,10 +3,19 @@ name = "train-checker"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "train-checker"
+path = "src/main.rs"
+
+[lib]
+name = "train_checker"
+path = "src/lib.rs"
+
 [dependencies]
 anyhow = "1.0.98"
 chrono = "0.4"
 chrono-humanize = "0.2"
+futures = "0.3"
 gtfs-structures = "0.44.0"
 prost-types = "0.13"
 prost = "0.13"

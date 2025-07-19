@@ -1921,6 +1921,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "chrono-humanize",
+ "futures",
  "gtfs-structures",
  "prost",
  "prost-build",
