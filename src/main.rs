@@ -1,21 +1,13 @@
 use anyhow::Result;
-use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind},
-    execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
-};
 use ratatui::{
-    Frame, Terminal,
-    backend::CrosstermBackend,
+    DefaultTerminal, Frame,
+    crossterm::event::{self, Event, KeyCode, KeyEventKind},
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
 };
-use std::{
-    io,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use train_checker::{StopStatus, TrainChecker, TrainCheckerStatus};
 
@@ -220,13 +212,97 @@ impl App {
             _ => None,
         }
     }
-}
 
-fn ui(f: &mut Frame, app: &mut App) {
-    match &app.state {
-        AppState::Loading => render_loading(f, app),
-        AppState::Selection => render_selection(f, app),
-        AppState::Polling { stop_name, .. } => render_polling(f, app, stop_name),
+    async fn run(mut self, mut terminal: DefaultTerminal) -> Result<()> {
+        // Create event channels
+        let (tx, mut rx) = mpsc::unbounded_channel();
+
+        // Spawn TrainChecker initialization
+        let init_tx = tx.clone();
+        tokio::spawn(async move {
+            match TrainChecker::new().await {
+                Ok(checker) => {
+                    if let Err(_) = init_tx.send(AppEvent::TrainCheckerReady(checker)) {
+                        // Channel closed, app probably quit
+                    }
+                }
+                Err(e) => {
+                    if let Err(_) = init_tx.send(AppEvent::TrainCheckerError(e.to_string())) {
+                        // Channel closed, app probably quit
+                    }
+                }
+            }
+        });
+
+        // Main app loop
+        loop {
+            terminal.draw(|f| self.draw(f))?;
+
+            // Handle keyboard input in a non-blocking way
+            // Use a short timeout to keep the app responsive
+            if event::poll(Duration::from_millis(100))? {
+                match event::read()? {
+                    Event::Key(key) if key.kind == KeyEventKind::Press => {
+                        self.handle_key_event(key.code);
+                    }
+                    Event::Resize(_, _) => {
+                        // Terminal was resized, will be handled in next draw
+                    }
+                    _ => {
+                        // Ignore other events
+                    }
+                }
+            }
+
+            // Handle async events (TrainChecker initialization, etc.)
+            // Use a very short timeout to not block the UI
+            match tokio::time::timeout(Duration::from_millis(10), rx.recv()).await {
+                Ok(Some(event)) => {
+                    self.handle_app_event(event);
+                }
+                Ok(None) => {
+                    // Channel closed, should quit
+                    break;
+                }
+                Err(_) => {
+                    // Timeout, continue
+                }
+            }
+
+            // Handle polling
+            if self.should_poll() {
+                if let (Some(checker), Some(stop_id)) =
+                    (&self.train_checker, self.get_current_stop_id())
+                {
+                    let stop_id = stop_id.to_string();
+
+                    // Handle polling synchronously for now
+                    // In a production app, we'd want to restructure this to use Arc<Mutex<TrainChecker>>
+                    match checker.get_stop_status(&stop_id).await {
+                        Ok(status) => {
+                            self.handle_app_event(AppEvent::StopStatusUpdate(status));
+                        }
+                        Err(_) => {
+                            // Silently ignore polling errors for now
+                        }
+                    }
+                }
+            }
+
+            if self.should_quit {
+                break;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn draw(&mut self, f: &mut Frame) {
+        match &self.state {
+            AppState::Loading => render_loading(f, self),
+            AppState::Selection => render_selection(f, self),
+            AppState::Polling { stop_name, .. } => render_polling(f, self, stop_name),
+        }
     }
 }
 
@@ -472,109 +548,11 @@ fn render_bottom_bar(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
 }
 
 async fn run_app() -> Result<()> {
-    // Setup terminal
-    // Raw Mode allows user input to be processed immediately.
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
+    let terminal = ratatui::init();
 
-    // Create app state
-    let mut app = App::new();
-
-    // Create event channels
-    let (tx, mut rx) = mpsc::unbounded_channel();
-
-    // Spawn TrainChecker initialization
-    let init_tx = tx.clone();
-    tokio::spawn(async move {
-        match TrainChecker::new().await {
-            Ok(checker) => {
-                if let Err(_) = init_tx.send(AppEvent::TrainCheckerReady(checker)) {
-                    // Channel closed, app probably quit
-                }
-            }
-            Err(e) => {
-                if let Err(_) = init_tx.send(AppEvent::TrainCheckerError(e.to_string())) {
-                    // Channel closed, app probably quit
-                }
-            }
-        }
-    });
-
-    // We'll handle input directly in the main loop rather than spawning a separate task
-    // This prevents conflicts between the spawned handler and main loop event polling
-
-    // Main app loop
-    loop {
-        terminal.draw(|f| ui(f, &mut app))?;
-
-        // Handle keyboard input in a non-blocking way
-        // Use a short timeout to keep the app responsive
-        if event::poll(Duration::from_millis(100))? {
-            match event::read()? {
-                Event::Key(key) if key.kind == KeyEventKind::Press => {
-                    app.handle_key_event(key.code);
-                }
-                Event::Resize(_, _) => {
-                    // Terminal was resized, will be handled in next draw
-                }
-                _ => {
-                    // Ignore other events
-                }
-            }
-        }
-
-        // Handle async events (TrainChecker initialization, etc.)
-        // Use a very short timeout to not block the UI
-        match tokio::time::timeout(Duration::from_millis(10), rx.recv()).await {
-            Ok(Some(event)) => {
-                app.handle_app_event(event);
-            }
-            Ok(None) => {
-                // Channel closed, should quit
-                break;
-            }
-            Err(_) => {
-                // Timeout, continue
-            }
-        }
-
-        // Handle polling
-        if app.should_poll() {
-            if let (Some(checker), Some(stop_id)) = (&app.train_checker, app.get_current_stop_id())
-            {
-                let stop_id = stop_id.to_string();
-
-                // Handle polling synchronously for now
-                // In a production app, we'd want to restructure this to use Arc<Mutex<TrainChecker>>
-                match checker.get_stop_status(&stop_id).await {
-                    Ok(status) => {
-                        app.handle_app_event(AppEvent::StopStatusUpdate(status));
-                    }
-                    Err(_) => {
-                        // Silently ignore polling errors for now
-                    }
-                }
-            }
-        }
-
-        if app.should_quit {
-            break;
-        }
-    }
-
-    // Restore terminal
-    disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    )?;
-    terminal.show_cursor()?;
-
-    Ok(())
+    let app_result = App::new().run(terminal).await;
+    ratatui::restore();
+    app_result
 }
 
 #[tokio::main]
