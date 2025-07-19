@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [[bin]]
-name = "train-checker"
+name = "train-checker-tui"
 path = "src/main.rs"
 
 [lib]
@@ -15,12 +15,14 @@ path = "src/lib.rs"
 anyhow = "1.0.98"
 chrono = "0.4"
 chrono-humanize = "0.2"
+crossterm = "0.28"
 futures = "0.3"
 gtfs-structures = "0.44.0"
 prost-types = "0.13"
 prost = "0.13"
 reqwest = { version = "0.12.22", features = ["json"] }
 tokio = { version = "1.46.1", features = ["full"] }
+ratatui = "0.29.0"
 
 [build-dependencies]
 prost-build = "0.13"
