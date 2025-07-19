@@ -1,7 +1,8 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::{Duration as ChronoDuration, Utc as ChronoUtc};
 use prost::Message;
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 mod subway;
@@ -15,6 +16,8 @@ const GTFS_URL: &str = "https://rrgtfsfeeds.s3.amazonaws.com/gtfs_subway.zip";
 // The base URL is for the numbered lines (1, 2, 3, 4, 5, 6, 7)
 const MTA_SUBWAY_FEED_URL: &str =
     "https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/nyct%2Fgtfs";
+
+// Suffixes for different routes in the MTA GTFS-Realtime feed.
 const SUFFIX_ACE: &str = "ace";
 const SUFFIX_BDFM: &str = "bdfm";
 const SUFFIX_G: &str = "g";
@@ -38,24 +41,66 @@ pub struct StopStatus {
     pub stop_id: String,
     pub stop_name: Option<String>,
     pub routes: HashSet<String>,
-    pub train_arrivals: HashMap<String, Vec<TrainArrival>>,
+    pub train_arrivals: HashMap<String, Vec<TrainArrival>>, // route_id -> [TrainArrival]
 }
 
 /// Core train checker that manages GTFS data and realtime feeds
 pub struct TrainChecker {
     gtfs: gtfs_structures::Gtfs,
+    stop_name_to_id: HashMap<String, String>,
+    stop_id_to_name: HashMap<String, String>,
+    failed_requests: AtomicU32,
+}
+
+pub enum TrainCheckerStatus {
+    Ok,
+    Error,
 }
 
 impl TrainChecker {
     /// Creates a new TrainChecker instance by fetching GTFS data
     pub async fn new() -> Result<Self> {
         let gtfs = Self::fetch_gtfs_data().await?;
-        Ok(Self { gtfs })
+
+        // Build lookup maps for efficient stop name/ID lookups
+        let mut stop_name_to_id = HashMap::new();
+        let mut stop_id_to_name = HashMap::new();
+        for (id, stop) in &gtfs.stops {
+            if let Some(name) = &stop.name {
+                stop_name_to_id.insert(name.clone(), id.clone());
+                stop_id_to_name.insert(id.clone(), name.clone());
+            }
+        }
+
+        Ok(Self {
+            gtfs,
+            stop_name_to_id,
+            stop_id_to_name,
+            failed_requests: AtomicU32::new(0),
+        })
+    }
+
+    pub fn get_failed_requests_count(&self) -> u32 {
+        self.failed_requests.load(Ordering::Relaxed)
+    }
+
+    pub fn reset_failed_requests(&self) {
+        self.failed_requests.store(0, Ordering::Relaxed);
+    }
+
+    pub fn get_status(&self) -> TrainCheckerStatus {
+        if self.get_failed_requests_count() > 10 {
+            TrainCheckerStatus::Error
+        } else {
+            TrainCheckerStatus::Ok
+        }
     }
 
     /// Fetches the GTFS data. This is used to get the list of stops and routes.
     async fn fetch_gtfs_data() -> Result<gtfs_structures::Gtfs> {
-        let gtfs = gtfs_structures::Gtfs::from_url_async(GTFS_URL).await?;
+        let gtfs = gtfs_structures::Gtfs::from_url_async(GTFS_URL)
+            .await
+            .context("Failed to fetch GTFS data from MTA feed")?;
         Ok(gtfs)
     }
 
@@ -76,7 +121,12 @@ impl TrainChecker {
 
     /// Gets the stop name for a given stop ID
     pub fn get_stop_name(&self, stop_id: &str) -> Option<String> {
-        self.gtfs.stops.get(stop_id)?.name.clone()
+        self.stop_id_to_name.get(stop_id).cloned()
+    }
+
+    /// Gets the stop ID for a given stop name
+    pub fn get_stop_id(&self, stop_name: &str) -> Option<String> {
+        self.stop_name_to_id.get(stop_name).cloned()
     }
 
     /// Gets all routes that serve a specific stop
@@ -163,22 +213,33 @@ impl TrainChecker {
     async fn fetch_realtime_data(url: &str) -> Result<FeedMessage> {
         let mut request = reqwest::Client::new().get(url);
         request = request.header("Accept", "application/x-protobuf");
-        let response = request.send().await?;
+        let response = request
+            .send()
+            .await
+            .context("Failed to fetch realtime data")?;
 
-        // Check if the response is successful
         if !response.status().is_success() {
             return Err(anyhow::anyhow!("HTTP error: {}", response.status()));
         }
 
-        let bytes = response.bytes().await?;
-        let feed_message = FeedMessage::decode(&bytes[..])?;
+        let bytes = response
+            .bytes()
+            .await
+            .context("Failed to read realtime response bytes")?;
+
+        let feed_message = FeedMessage::decode(bytes.as_ref())
+            .context("Failed to decode realtime protobuf message")?;
 
         Ok(feed_message)
     }
 
     /// Fetches and combines realtime data from multiple MTA feeds
     async fn fetch_combined_realtime_data(&self, feeds: &[String]) -> Result<Vec<FeedMessage>> {
-        // Create futures for all feeds using tokio::spawn to avoid lifetime issues
+        if feeds.is_empty() {
+            return Err(anyhow::anyhow!("No feeds provided for realtime data"));
+        }
+
+        // Make parallel requests to the feeds.
         let mut handles = Vec::new();
         for feed_suffix in feeds {
             let url = if feed_suffix.is_empty() {
@@ -192,7 +253,6 @@ impl TrainChecker {
             handles.push(handle);
         }
 
-        // Wait for all tasks to complete
         let mut feed_messages = Vec::new();
         for handle in handles {
             match handle.await {
@@ -201,9 +261,11 @@ impl TrainChecker {
                 }
                 Ok(Err(e)) => {
                     eprintln!("Failed to fetch feed: {}", e);
+                    self.failed_requests.fetch_add(1, Ordering::Relaxed);
                 }
                 Err(e) => {
                     eprintln!("Task failed: {}", e);
+                    self.failed_requests.fetch_add(1, Ordering::Relaxed);
                 }
             }
         }
