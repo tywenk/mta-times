@@ -385,6 +385,11 @@ impl TrainChecker {
     pub fn print_stats(&self) {
         self.gtfs.print_stats();
     }
+
+    /// Formats a stop for display as "Name (Direction)"
+    pub fn format_stop_display(&self, stop_id: &str, stop_name: &str) -> String {
+        return format!("{} ({})", stop_name, stop_id);
+    }
 }
 
 /// Configuration for the train checker

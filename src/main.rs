@@ -10,7 +10,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Gauge, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
 };
 use std::{
     io,
@@ -80,10 +80,10 @@ impl App {
                     if let Some(selected) = self.list_state.selected() {
                         if selected < self.filtered_stops.len() {
                             let stop_index = self.filtered_stops[selected];
-                            let (stop_id, stop_name) = &self.stops[stop_index];
+                            let (stop_id, display_name) = &self.stops[stop_index];
                             self.state = AppState::Polling {
                                 stop_id: stop_id.clone(),
-                                stop_name: stop_name.clone(),
+                                stop_name: display_name.clone(),
                             };
                             self.current_stop_status = None;
                             self.last_update = None;
@@ -147,7 +147,16 @@ impl App {
                 let stops: Vec<(String, String)> = checker
                     .get_all_stops()
                     .into_iter()
-                    .map(|(id, name)| (id, name.unwrap_or_else(|| "Unknown".to_string())))
+                    .filter_map(|(id, name)| {
+                        // Only include stops that end with 'N' or 'S'
+                        if id.ends_with('N') || id.ends_with('S') {
+                            let stop_name = name.unwrap_or_else(|| "Unknown".to_string());
+                            let display_name = checker.format_stop_display(&id, &stop_name);
+                            Some((id, display_name))
+                        } else {
+                            None
+                        }
+                    })
                     .collect();
 
                 self.stops = stops;
@@ -174,9 +183,9 @@ impl App {
             .stops
             .iter()
             .enumerate()
-            .filter(|(_, (stop_id, stop_name))| {
+            .filter(|(_, (stop_id, display_name))| {
                 stop_id.to_lowercase().contains(&search_lower)
-                    || stop_name.to_lowercase().contains(&search_lower)
+                    || display_name.to_lowercase().contains(&search_lower)
             })
             .map(|(i, _)| i)
             .collect();
@@ -258,26 +267,6 @@ fn render_loading(f: &mut Frame, app: &App) {
         .style(Style::default().fg(Color::White));
 
     f.render_widget(loading_paragraph, chunks[1]);
-
-    // Render a simple progress indicator if no error
-    if app.error_message.is_none() {
-        let progress = Gauge::default()
-            .block(Block::default().borders(Borders::ALL))
-            .gauge_style(Style::default().fg(Color::Green))
-            .percent(50)
-            .label("Loading...");
-
-        let progress_chunks = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Percentage(20),
-                Constraint::Percentage(60),
-                Constraint::Percentage(20),
-            ])
-            .split(chunks[2]);
-
-        f.render_widget(progress, progress_chunks[1]);
-    }
 }
 
 fn render_selection(f: &mut Frame, app: &mut App) {
@@ -319,8 +308,8 @@ fn render_selection(f: &mut Frame, app: &mut App) {
         .filtered_stops
         .iter()
         .map(|&i| {
-            let (stop_id, stop_name) = &app.stops[i];
-            ListItem::new(format!("{}: {}", stop_id, stop_name))
+            let (_stop_id, display_name) = &app.stops[i];
+            ListItem::new(display_name.as_str())
         })
         .collect();
 
@@ -352,8 +341,8 @@ fn render_polling(f: &mut Frame, app: &App, stop_name: &str) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3), // Header
-            Constraint::Min(0),    // Main content
-            Constraint::Length(5), // Footer with controls
+            Constraint::Min(0),    // Train arrivals (full width)
+            Constraint::Length(3), // Bottom bar with status and controls
         ])
         .split(f.area());
 
@@ -364,27 +353,11 @@ fn render_polling(f: &mut Frame, app: &App, stop_name: &str) {
         .style(Style::default().fg(Color::Green));
     f.render_widget(header, chunks[0]);
 
-    // Main content area
-    let main_chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
-        .split(chunks[1]);
+    // Train arrivals (full width)
+    render_train_arrivals(f, app, chunks[1]);
 
-    // Train arrivals (left side)
-    render_train_arrivals(f, app, main_chunks[0]);
-
-    // Status and controls (right side)
-    render_status_panel(f, app, main_chunks[1]);
-
-    // Footer with instructions
-    let footer_text = format!(
-        "Refresh: {} seconds | s: Switch Stop | +/-: Adjust Rate | q: Quit",
-        app.polling_interval.as_secs()
-    );
-    let footer = Paragraph::new(footer_text)
-        .block(Block::default().borders(Borders::ALL))
-        .style(Style::default().fg(Color::Gray));
-    f.render_widget(footer, chunks[2]);
+    // Bottom bar with status and controls
+    render_bottom_bar(f, app, chunks[2]);
 }
 
 fn render_train_arrivals(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
@@ -434,67 +407,73 @@ fn render_train_arrivals(f: &mut Frame, app: &App, area: ratatui::layout::Rect) 
     }
 }
 
-fn render_status_panel(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(area);
+fn render_bottom_bar(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
+    // Create the footer text with current rate
+    let footer_text = format!(
+        "Rate: {}s | s: Switch Stop | +/-: Adjust Rate | q: Quit",
+        app.polling_interval.as_secs()
+    );
 
-    // Status info
-    let mut status_lines = Vec::new();
-
+    // Create status text
+    let mut status_text = String::new();
     if let Some(checker) = &app.train_checker {
         let status = checker.get_status();
         let failed_requests = checker.get_failed_requests_count();
 
-        status_lines.push(Line::from(format!("Failed requests: {}", failed_requests)));
-
-        let (status_text, status_color) = match status {
-            TrainCheckerStatus::Ok => ("OK", Color::Green),
-            TrainCheckerStatus::Error => ("ERROR", Color::Red),
+        let status_symbol = match status {
+            TrainCheckerStatus::Ok => "OK",
+            TrainCheckerStatus::Error => "ERR",
         };
 
-        status_lines.push(Line::from(vec![
-            Span::raw("Status: "),
-            Span::styled(status_text, Style::default().fg(status_color)),
-        ]));
+        if failed_requests > 0 {
+            status_text = format!("{}:{}", status_symbol, failed_requests);
+        } else {
+            status_text = status_symbol.to_string();
+        }
+
+        if let Some(last_update) = app.last_update {
+            let elapsed = last_update.elapsed().as_secs();
+            status_text.push_str(&format!(" ({}s ago)", elapsed));
+        }
     }
 
-    if let Some(last_update) = app.last_update {
-        let elapsed = last_update.elapsed().as_secs();
-        status_lines.push(Line::from(format!("Last update: {}s ago", elapsed)));
-    }
+    // Calculate layout - status is right-aligned with its content width
+    let status_width = status_text.len() as u16 + 2; // +2 for borders
+    let footer_width = area.width.saturating_sub(status_width);
 
-    let status_block = Block::default()
-        .title("System Status")
-        .borders(Borders::ALL);
+    let bottom_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Length(footer_width),
+            Constraint::Length(status_width),
+        ])
+        .split(area);
 
-    let status_paragraph = Paragraph::new(status_lines)
-        .block(status_block)
-        .style(Style::default().fg(Color::White));
-    f.render_widget(status_paragraph, chunks[0]);
+    // Render footer
+    let footer = Paragraph::new(footer_text)
+        .block(Block::default().borders(Borders::ALL))
+        .style(Style::default().fg(Color::Gray));
+    f.render_widget(footer, bottom_chunks[0]);
 
-    // Polling controls
-    let control_lines = vec![
-        Line::from("Controls:"),
-        Line::from(""),
-        Line::from("+ : Faster refresh"),
-        Line::from("- : Slower refresh"),
-        Line::from(format!("Rate: {}s", app.polling_interval.as_secs())),
-    ];
+    // Render status (right-aligned)
+    let status_color = if let Some(checker) = &app.train_checker {
+        match checker.get_status() {
+            TrainCheckerStatus::Ok => Color::Green,
+            TrainCheckerStatus::Error => Color::Red,
+        }
+    } else {
+        Color::Gray
+    };
 
-    let control_block = Block::default()
-        .title("Polling Controls")
-        .borders(Borders::ALL);
-
-    let control_paragraph = Paragraph::new(control_lines)
-        .block(control_block)
-        .style(Style::default().fg(Color::White));
-    f.render_widget(control_paragraph, chunks[1]);
+    let status = Paragraph::new(status_text)
+        .block(Block::default().borders(Borders::ALL))
+        .style(Style::default().fg(status_color));
+    f.render_widget(status, bottom_chunks[1]);
 }
 
 async fn run_app() -> Result<()> {
     // Setup terminal
+    // Raw Mode allows user input to be processed immediately.
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
