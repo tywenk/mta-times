@@ -1,7 +1,7 @@
 use anyhow::Result;
 use ratatui::{
     DefaultTerminal, Frame,
-    crossterm::event::{self, Event, KeyCode, KeyEventKind},
+    crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
     layout::{Alignment, Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
@@ -62,13 +62,16 @@ impl App {
         }
     }
 
-    fn handle_key_event(&mut self, key: KeyCode) {
+    fn handle_key_event(&mut self, key: crossterm::event::KeyEvent) {
+        // Handle Ctrl-C globally to quit
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+            self.should_quit = true;
+            return;
+        }
+
         match &self.state {
-            AppState::Loading => {
-                // No input during loading
-            }
-            AppState::Selection => match key {
-                KeyCode::Char('q') => self.should_quit = true,
+            AppState::Loading => {}
+            AppState::Selection => match key.code {
                 KeyCode::Enter => {
                     if let Some(selected) = self.list_state.selected() {
                         if selected < self.filtered_stops.len() {
@@ -106,8 +109,7 @@ impl App {
                 _ => {}
             },
             AppState::Polling { .. } => {
-                match key {
-                    KeyCode::Char('q') => self.should_quit = true,
+                match key.code {
                     KeyCode::Char('s') => {
                         self.state = AppState::Selection;
                         self.current_stop_status = None;
@@ -235,47 +237,31 @@ impl App {
             }
         });
 
-        // Main app loop
-        let mut last_draw = Instant::now();
-        let mut needs_redraw = true;
-
+        // Simple event loop - let ratatui handle efficiency
         loop {
-            // Only redraw when necessary
-            if needs_redraw || last_draw.elapsed() >= Duration::from_millis(1000) {
-                terminal.draw(|f| self.draw(f))?;
-                last_draw = Instant::now();
-                needs_redraw = false;
-            }
+            // Always draw - ratatui only updates what changed
+            terminal.draw(|f| self.draw(f))?;
 
-            // Handle keyboard input with longer timeout to reduce CPU usage
-            if event::poll(Duration::from_millis(250))? {
+            // Handle events with reasonable timeout
+            if event::poll(Duration::from_millis(100))? {
                 match event::read()? {
                     Event::Key(key) if key.kind == KeyEventKind::Press => {
-                        self.handle_key_event(key.code);
-                        needs_redraw = true;
+                        self.handle_key_event(key);
                     }
                     Event::Resize(_, _) => {
-                        needs_redraw = true;
+                        // Ratatui handles this automatically
                     }
-                    _ => {
-                        // Ignore other events
-                    }
+                    _ => {}
                 }
             }
 
-            // Handle async events with longer timeout
-            match tokio::time::timeout(Duration::from_millis(100), rx.recv()).await {
+            // Handle async events
+            match tokio::time::timeout(Duration::from_millis(50), rx.recv()).await {
                 Ok(Some(event)) => {
                     self.handle_app_event(event);
-                    needs_redraw = true;
                 }
-                Ok(None) => {
-                    // Channel closed, should quit
-                    break;
-                }
-                Err(_) => {
-                    // Timeout, continue
-                }
+                Ok(None) => break, // Channel closed
+                Err(_) => {}       // Timeout, continue
             }
 
             // Handle polling
@@ -284,28 +270,17 @@ impl App {
                     (&self.train_checker, self.get_current_stop_id())
                 {
                     let stop_id = stop_id.to_string();
-
-                    // Handle polling synchronously for now
-                    // In a production app, we'd want to restructure this to use Arc<Mutex<TrainChecker>>
                     match checker.get_stop_status(&stop_id).await {
                         Ok(status) => {
                             self.handle_app_event(AppEvent::StopStatusUpdate(status));
-                            needs_redraw = true;
                         }
-                        Err(_) => {
-                            // Silently ignore polling errors for now
-                        }
+                        Err(_) => {} // Silently ignore polling errors
                     }
                 }
             }
 
             if self.should_quit {
                 break;
-            }
-
-            // Small sleep to prevent spinning when no events occur
-            if !needs_redraw {
-                tokio::time::sleep(Duration::from_millis(50)).await;
             }
         }
 
