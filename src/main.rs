@@ -2,7 +2,7 @@ use anyhow::Result;
 use ratatui::{
     DefaultTerminal, Frame,
     crossterm::event::{self, Event, KeyCode, KeyEventKind},
-    layout::{Constraint, Direction, Layout},
+    layout::{Alignment, Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
@@ -10,6 +10,7 @@ use ratatui::{
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use train_checker::{StopStatus, TrainChecker, TrainCheckerStatus};
+use tui_big_text::{BigText, PixelSize};
 
 #[derive(Debug, Clone)]
 enum AppState {
@@ -235,18 +236,26 @@ impl App {
         });
 
         // Main app loop
-        loop {
-            terminal.draw(|f| self.draw(f))?;
+        let mut last_draw = Instant::now();
+        let mut needs_redraw = true;
 
-            // Handle keyboard input in a non-blocking way
-            // Use a short timeout to keep the app responsive
-            if event::poll(Duration::from_millis(100))? {
+        loop {
+            // Only redraw when necessary
+            if needs_redraw || last_draw.elapsed() >= Duration::from_millis(1000) {
+                terminal.draw(|f| self.draw(f))?;
+                last_draw = Instant::now();
+                needs_redraw = false;
+            }
+
+            // Handle keyboard input with longer timeout to reduce CPU usage
+            if event::poll(Duration::from_millis(250))? {
                 match event::read()? {
                     Event::Key(key) if key.kind == KeyEventKind::Press => {
                         self.handle_key_event(key.code);
+                        needs_redraw = true;
                     }
                     Event::Resize(_, _) => {
-                        // Terminal was resized, will be handled in next draw
+                        needs_redraw = true;
                     }
                     _ => {
                         // Ignore other events
@@ -254,11 +263,11 @@ impl App {
                 }
             }
 
-            // Handle async events (TrainChecker initialization, etc.)
-            // Use a very short timeout to not block the UI
-            match tokio::time::timeout(Duration::from_millis(10), rx.recv()).await {
+            // Handle async events with longer timeout
+            match tokio::time::timeout(Duration::from_millis(100), rx.recv()).await {
                 Ok(Some(event)) => {
                     self.handle_app_event(event);
+                    needs_redraw = true;
                 }
                 Ok(None) => {
                     // Channel closed, should quit
@@ -281,6 +290,7 @@ impl App {
                     match checker.get_stop_status(&stop_id).await {
                         Ok(status) => {
                             self.handle_app_event(AppEvent::StopStatusUpdate(status));
+                            needs_redraw = true;
                         }
                         Err(_) => {
                             // Silently ignore polling errors for now
@@ -291,6 +301,11 @@ impl App {
 
             if self.should_quit {
                 break;
+            }
+
+            // Small sleep to prevent spinning when no events occur
+            if !needs_redraw {
+                tokio::time::sleep(Duration::from_millis(50)).await;
             }
         }
 
@@ -307,42 +322,66 @@ impl App {
 }
 
 fn render_loading(f: &mut Frame, app: &App) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage(40),
-            Constraint::Percentage(20),
-            Constraint::Percentage(40),
-        ])
-        .split(f.area());
+    if let Some(error) = &app.error_message {
+        // Show error in a traditional text block
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Percentage(40),
+                Constraint::Percentage(20),
+                Constraint::Percentage(40),
+            ])
+            .split(f.area());
 
-    let loading_block = Block::default()
-        .title("NYC Train Checker")
-        .borders(Borders::ALL)
-        .style(Style::default().fg(Color::Blue));
+        let error_block = Block::default()
+            .title("NYC Train Checker - Error")
+            .borders(Borders::ALL)
+            .style(Style::default().fg(Color::Red));
 
-    let loading_text = if let Some(error) = &app.error_message {
-        Text::from(vec![
+        let error_text = Text::from(vec![
             Line::from("Error loading train data:"),
             Line::from(""),
             Line::from(error.as_str()).style(Style::default().fg(Color::Red)),
             Line::from(""),
             Line::from("Press 'q' to quit"),
-        ])
+        ]);
+
+        let error_paragraph = Paragraph::new(error_text)
+            .block(error_block)
+            .wrap(Wrap { trim: true })
+            .style(Style::default().fg(Color::White));
+
+        f.render_widget(error_paragraph, chunks[1]);
     } else {
-        Text::from(vec![
-            Line::from("Loading GTFS data..."),
-            Line::from(""),
-            Line::from("This may take a moment on first run."),
-        ])
-    };
+        // Show big "LOADING" text
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Percentage(30),
+                Constraint::Length(8), // Height for big text
+                Constraint::Length(3), // Height for subtitle
+                Constraint::Percentage(30),
+            ])
+            .split(f.area());
 
-    let loading_paragraph = Paragraph::new(loading_text)
-        .block(loading_block)
-        .wrap(Wrap { trim: true })
-        .style(Style::default().fg(Color::White));
+        // Big "LOADING" text
+        let big_text = BigText::builder()
+            .pixel_size(PixelSize::Full)
+            .style(Style::default().fg(Color::Blue))
+            .lines(vec!["LOADING".into()])
+            .centered()
+            .build();
 
-    f.render_widget(loading_paragraph, chunks[1]);
+        f.render_widget(big_text, chunks[1]);
+
+        // Subtitle text
+        let subtitle = Paragraph::new("NYC Train Checker - Fetching GTFS data...")
+            .style(Style::default().fg(Color::Gray))
+            .block(Block::default().borders(Borders::NONE))
+            .alignment(Alignment::Center);
+
+        f.render_widget(subtitle, chunks[2]);
+    }
 }
 
 fn render_selection(f: &mut Frame, app: &mut App) {
