@@ -139,12 +139,6 @@ impl App {
                     self.search_input.pop();
                     self.filter_stops();
                 }
-                KeyCode::Char('l') | KeyCode::Char('L') => {
-                    self.log("Entering log mode from selection".to_string());
-                    self.previous_state = Some(self.state.clone());
-                    self.state = AppState::Log;
-                    self.needs_log_reload = true; // Trigger log file reload
-                }
                 KeyCode::Char(c) => {
                     self.search_input.push(c);
                     self.filter_stops();
@@ -554,13 +548,17 @@ fn render_train_arrivals(f: &mut Frame, app: &App, area: ratatui::layout::Rect) 
             // Format text lines for BigText display
             let mut big_text_lines = Vec::new();
 
-            for (route_id, arrivals) in &status.train_arrivals {
+            // Sort train arrivals alphabetically by route_id for deterministic order
+            let mut sorted_arrivals: Vec<_> = status.train_arrivals.iter().collect();
+            sorted_arrivals.sort_by_key(|(route_id, _)| *route_id);
+
+            for (route_id, arrivals) in sorted_arrivals {
                 let route_display = arrivals
                     .first()
                     .and_then(|a| a.route_name.as_ref())
                     .unwrap_or(route_id);
 
-                // Format as "G: in a minute, and 5 minutes."
+                // Format as "G: in 18 and 30 minutes"
                 let arrival_times: Vec<String> = arrivals
                     .iter()
                     .take(2)
@@ -570,10 +568,7 @@ fn render_train_arrivals(f: &mut Frame, app: &App, area: ratatui::layout::Rect) 
                 let formatted_line = if arrival_times.len() == 1 {
                     format!("{}: {}", route_display, arrival_times[0])
                 } else if arrival_times.len() == 2 {
-                    format!(
-                        "{}: {}, and {}",
-                        route_display, arrival_times[0], arrival_times[1]
-                    )
+                    format!("{}: {}", route_display, arrival_times[0])
                 } else {
                     format!("{}: No arrivals", route_display)
                 };
@@ -595,7 +590,7 @@ fn render_train_arrivals(f: &mut Frame, app: &App, area: ratatui::layout::Rect) 
                 big_text_lines.into_iter().map(|s| Line::from(s)).collect();
 
             let big_text = BigText::builder()
-                .pixel_size(PixelSize::Sextant) // Smaller than Full but still large
+                .pixel_size(PixelSize::Quadrant)
                 .style(Style::default().fg(Color::Cyan))
                 .lines(big_text_lines)
                 .centered()
