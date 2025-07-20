@@ -7,22 +7,28 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
 };
+
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
+use tracing::info;
 use train_checker::{StopStatus, TrainChecker, TrainCheckerStatus};
 use tui_big_text::{BigText, PixelSize};
+
+mod logger;
 
 #[derive(Debug, Clone)]
 enum AppState {
     Loading,
     Selection,
     Polling { stop_id: String, stop_name: String },
+    Log,
 }
 
 enum AppEvent {
     TrainCheckerReady(TrainChecker),
     TrainCheckerError(String),
     StopStatusUpdate(StopStatus),
+    LogFileLoaded,
 }
 
 struct App {
@@ -43,11 +49,16 @@ struct App {
     // UI state
     should_quit: bool,
     error_message: Option<String>,
+    previous_state: Option<AppState>,
+
+    // Log state
+    file_log_entries: Vec<String>, // Logs read from file
+    needs_log_reload: bool,        // Flag to trigger log file reload
 }
 
 impl App {
     fn new() -> Self {
-        Self {
+        let app = Self {
             state: AppState::Loading,
             train_checker: None,
             stops: Vec::new(),
@@ -59,6 +70,31 @@ impl App {
             last_update: None,
             should_quit: false,
             error_message: None,
+            previous_state: None,
+            file_log_entries: Vec::new(),
+            needs_log_reload: false,
+        };
+        app.log("Application initialized".to_string());
+        app
+    }
+
+    fn log(&self, message: String) {
+        // Log to tracing (will write to file)
+        info!("{}", message);
+    }
+
+    /// Load logs from the file and update the file_log_entries field
+    async fn update_file_logs(&mut self) -> Result<()> {
+        match logger::read_log_entries().await {
+            Ok(logs) => {
+                self.file_log_entries = logs;
+                self.log("Loaded logs from file".to_string());
+                Ok(())
+            }
+            Err(e) => {
+                self.log(format!("Failed to read logs from file: {}", e));
+                Err(e)
+            }
         }
     }
 
@@ -77,6 +113,7 @@ impl App {
                         if selected < self.filtered_stops.len() {
                             let stop_index = self.filtered_stops[selected];
                             let (stop_id, display_name) = &self.stops[stop_index];
+                            self.log(format!("Selected stop: {} ({})", display_name, stop_id));
                             self.state = AppState::Polling {
                                 stop_id: stop_id.clone(),
                                 stop_name: display_name.clone(),
@@ -102,6 +139,12 @@ impl App {
                     self.search_input.pop();
                     self.filter_stops();
                 }
+                KeyCode::Char('l') | KeyCode::Char('L') => {
+                    self.log("Entering log mode from selection".to_string());
+                    self.previous_state = Some(self.state.clone());
+                    self.state = AppState::Log;
+                    self.needs_log_reload = true; // Trigger log file reload
+                }
                 KeyCode::Char(c) => {
                     self.search_input.push(c);
                     self.filter_stops();
@@ -111,10 +154,17 @@ impl App {
             AppState::Polling { .. } => {
                 match key.code {
                     KeyCode::Char('s') => {
+                        self.log("Returning to stop selection".to_string());
                         self.state = AppState::Selection;
                         self.current_stop_status = None;
                         self.search_input.clear();
                         self.filter_stops();
+                    }
+                    KeyCode::Char('l') | KeyCode::Char('L') => {
+                        self.log("Entering log mode from polling".to_string());
+                        self.previous_state = Some(self.state.clone());
+                        self.state = AppState::Log;
+                        self.needs_log_reload = true; // Trigger log file reload
                     }
                     KeyCode::Char('+') | KeyCode::Char('=') => {
                         // Decrease polling interval (faster)
@@ -133,12 +183,27 @@ impl App {
                     _ => {}
                 }
             }
+            AppState::Log => {
+                match key.code {
+                    KeyCode::Char('l') | KeyCode::Esc => {
+                        // Exit log mode and return to previous state
+                        let previous = self.previous_state.clone().unwrap_or(AppState::Selection);
+                        self.log(format!("Exiting log mode, returning to {:?}", previous));
+                        self.state = previous;
+                        self.previous_state = None;
+                    }
+                    _ => {
+                        // In log mode, most keys are ignored (Ctrl-C handled globally above)
+                    }
+                }
+            }
         }
     }
 
     fn handle_app_event(&mut self, event: AppEvent) {
         match event {
             AppEvent::TrainCheckerReady(checker) => {
+                self.log("TrainChecker ready, loading stops".to_string());
                 let stops: Vec<(String, String)> = checker
                     .get_all_stops()
                     .into_iter()
@@ -154,19 +219,28 @@ impl App {
                     })
                     .collect();
 
+                self.log(format!("Loaded {} stops", stops.len()));
                 self.stops = stops;
                 self.train_checker = Some(checker);
                 self.state = AppState::Selection;
                 self.filter_stops();
             }
             AppEvent::TrainCheckerError(error) => {
+                self.log(format!("TrainChecker error: {}", error));
                 self.error_message = Some(error);
             }
             AppEvent::StopStatusUpdate(status) => {
                 if matches!(self.state, AppState::Polling { .. }) {
+                    self.log(format!(
+                        "Updated stop status: {} train arrivals",
+                        status.train_arrivals.len()
+                    ));
                     self.current_stop_status = Some(status);
                     self.last_update = Some(Instant::now());
                 }
+            }
+            AppEvent::LogFileLoaded => {
+                // Log file has been loaded, UI will automatically update
             }
         }
     }
@@ -279,6 +353,20 @@ impl App {
                 }
             }
 
+            // Handle log file loading
+            if self.needs_log_reload {
+                self.needs_log_reload = false;
+                if let Err(_) = self.update_file_logs().await {
+                    // Error already logged in update_file_logs
+                    self.log("Error reloading log file".to_string());
+                }
+                // Send event to trigger UI update (though it's not strictly necessary)
+                if let Err(_) = tx.send(AppEvent::LogFileLoaded) {
+                    // Channel closed, app probably quitting
+                    self.log("Channel closed, app probably quitting".to_string());
+                }
+            }
+
             if self.should_quit {
                 break;
             }
@@ -290,6 +378,7 @@ impl App {
     fn draw(&mut self, f: &mut Frame) {
         match &self.state {
             AppState::Loading => render_loading(f, self),
+            AppState::Log => render_log(f, self),
             AppState::Selection => render_selection(f, self),
             AppState::Polling { stop_name, .. } => render_polling(f, self, stop_name),
         }
@@ -318,7 +407,7 @@ fn render_loading(f: &mut Frame, app: &App) {
             Line::from(""),
             Line::from(error.as_str()).style(Style::default().fg(Color::Red)),
             Line::from(""),
-            Line::from("Press 'q' to quit"),
+            Line::from("Press 'Ctrl-C' to quit"),
         ]);
 
         let error_paragraph = Paragraph::new(error_text)
@@ -420,7 +509,7 @@ fn render_selection(f: &mut Frame, app: &mut App) {
     f.render_stateful_widget(list, chunks[2], &mut app.list_state);
 
     // Footer with instructions
-    let footer = Paragraph::new("↑↓: Navigate | Enter: Select | q: Quit")
+    let footer = Paragraph::new("↑↓: Navigate | Enter: Select | Ctrl-C: Quit")
         .block(Block::default().borders(Borders::ALL))
         .style(Style::default().fg(Color::Gray));
     f.render_widget(footer, chunks[3]);
@@ -500,7 +589,7 @@ fn render_train_arrivals(f: &mut Frame, app: &App, area: ratatui::layout::Rect) 
 fn render_bottom_bar(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     // Create the footer text with current rate
     let footer_text = format!(
-        "Rate: {}s | s: Switch Stop | +/-: Adjust Rate | q: Quit",
+        "Rate: {}s | s: Switch Stop | +/-: Adjust Rate | Ctrl-L: Log | Ctrl-C: Quit",
         app.polling_interval.as_secs()
     );
 
@@ -561,7 +650,41 @@ fn render_bottom_bar(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     f.render_widget(status, bottom_chunks[1]);
 }
 
+fn render_log(f: &mut Frame, app: &App) {
+    let main_block = Block::default()
+        .title("Debug Log (from file) (L to enter, q/Esc/Ctrl-L to exit, Ctrl-C to quit)")
+        .borders(Borders::ALL)
+        .style(Style::default().fg(Color::White));
+
+    let log_messages = if app.file_log_entries.is_empty() {
+        vec![ListItem::new("No log entries found or logs not yet loaded")]
+    } else {
+        // Calculate how many lines we can display (subtract 2 for borders)
+        let display_height = f.area().height.saturating_sub(2) as usize;
+        let max_lines = display_height.max(10); // Ensure at least 10 lines
+
+        // Take the last N lines (most recent) and display in chronological order
+        // This way newest logs appear at the bottom
+        let start_index = app.file_log_entries.len().saturating_sub(max_lines);
+        app.file_log_entries
+            .iter()
+            .skip(start_index)
+            .map(|msg| ListItem::new(msg.clone()))
+            .collect::<Vec<_>>()
+    };
+
+    let log_list = List::new(log_messages)
+        .block(main_block)
+        .style(Style::default().fg(Color::White))
+        .highlight_style(Style::default().bg(Color::Blue));
+
+    f.render_widget(log_list, f.area());
+}
+
 async fn run_app() -> Result<()> {
+    logger::initialize_logging()?;
+    info!("Starting train checker application");
+
     let terminal = ratatui::init();
 
     let app_result = App::new().run(terminal).await;

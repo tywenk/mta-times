@@ -11,6 +11,18 @@ path = "src/main.rs"
 name = "train_checker"
 path = "src/lib.rs"
 
+[profile.release]
+# Optimize for size instead of speed
+opt-level = "s"
+# Enable link-time optimization for better dead code elimination
+lto = true
+# Use fewer code generation units for better optimization
+codegen-units = 1
+# Use abort instead of unwind for panics (smaller binary)
+panic = "abort"
+# Strip symbols from the binary
+strip = true
+
 [dependencies]
 anyhow = "1.0.98"
 chrono = "0.4"
@@ -24,6 +36,11 @@ reqwest = { version = "0.12.22", features = ["json"] }
 tokio = { version = "1.46.1", features = ["full"] }
 ratatui = "0.29.0"
 tui-big-text = "0.7.1"
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
+directories = "6.0.0"
+lazy_static = "1.5.0"
+tracing-error = "0.2.1"
 
 [build-dependencies]
 prost-build = "0.13"

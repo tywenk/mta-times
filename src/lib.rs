@@ -283,6 +283,7 @@ impl TrainChecker {
         let feeds = self.get_realtime_feeds_for_routes(&routes)?;
         let realtime_feeds = self.fetch_combined_realtime_data(&feeds).await?;
 
+        // Map of route ID to a list of arrival times.
         let mut route_times: HashMap<String, Vec<i32>> = HashMap::new();
         let current_timestamp = ChronoUtc::now().timestamp();
 
@@ -296,17 +297,13 @@ impl TrainChecker {
                                 // Found a train coming to our stop
                                 if let Some(arrival) = &stop_update.arrival {
                                     if let Some(arrival_time) = arrival.time {
-                                        let arrival_timestamp = arrival_time as i64;
                                         let time_diff =
-                                            (arrival_timestamp - current_timestamp) as i32;
-
+                                            arrival_time as i32 - current_timestamp as i32;
                                         if time_diff > 0 {
                                             // Get route ID from trip descriptor
                                             if let Some(route_id) = &trip_update.trip.route_id {
-                                                let route_name = route_id.clone();
-
                                                 route_times
-                                                    .entry(route_name)
+                                                    .entry(route_id.clone())
                                                     .or_insert_with(Vec::new)
                                                     .push(time_diff);
                                             }
@@ -321,6 +318,7 @@ impl TrainChecker {
         }
 
         // Convert to TrainArrival objects
+        // Map of route ID to a list of TrainArrival objects.
         let mut train_arrivals: HashMap<String, Vec<TrainArrival>> = HashMap::new();
         for (route_id, times) in route_times {
             let mut sorted_times = times.clone();
