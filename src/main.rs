@@ -2,10 +2,10 @@ use anyhow::Result;
 use ratatui::{
     DefaultTerminal, Frame,
     crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
-    layout::{Alignment, Constraint, Direction, Layout},
+    layout::{Alignment, Constraint, Direction, Flex, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Text},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{Block, Borders, List, ListItem, ListState, Padding, Paragraph, Wrap},
 };
 
 use std::time::{Duration, Instant};
@@ -379,18 +379,17 @@ impl App {
     }
 }
 
+fn center(area: Rect, horizontal: Constraint, vertical: Constraint) -> Rect {
+    let [area] = Layout::horizontal([horizontal])
+        .flex(Flex::Center)
+        .areas(area);
+    let [area] = Layout::vertical([vertical]).flex(Flex::Center).areas(area);
+    area
+}
+
 fn render_loading(f: &mut Frame, app: &App) {
     if let Some(error) = &app.error_message {
         // Show error in a traditional text block
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Percentage(40),
-                Constraint::Percentage(20),
-                Constraint::Percentage(40),
-            ])
-            .split(f.area());
-
         let error_block = Block::default()
             .title("NYC Train Checker - Error")
             .borders(Borders::ALL)
@@ -409,28 +408,22 @@ fn render_loading(f: &mut Frame, app: &App) {
             .wrap(Wrap { trim: true })
             .style(Style::default().fg(Color::White));
 
-        f.render_widget(error_paragraph, chunks[1]);
+        // Center the error message (estimate 7 lines including borders)
+        let error_height = 7;
+        let centered_area = center(
+            f.area(),
+            Constraint::Percentage(100),
+            Constraint::Length(error_height),
+        );
+        f.render_widget(error_paragraph, centered_area);
     } else {
         // Show big "LOADING" text
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Percentage(30),
-                Constraint::Length(8), // Height for big text
-                Constraint::Length(3), // Height for subtitle
-                Constraint::Percentage(30),
-            ])
-            .split(f.area());
-
-        // Big "LOADING" text
         let big_text = BigText::builder()
             .pixel_size(PixelSize::Full)
             .style(Style::default().fg(Color::Blue))
             .lines(vec!["LOADING".into()])
-            .centered()
+            .alignment(Alignment::Center)
             .build();
-
-        f.render_widget(big_text, chunks[1]);
 
         // Subtitle text
         let subtitle = Paragraph::new("NYC Train Checker - Fetching GTFS data...")
@@ -438,7 +431,25 @@ fn render_loading(f: &mut Frame, app: &App) {
             .block(Block::default().borders(Borders::NONE))
             .alignment(Alignment::Center);
 
-        f.render_widget(subtitle, chunks[2]);
+        // Center the loading content (BigText ~8 rows + subtitle ~3 rows)
+        let loading_height = 11;
+        let centered_area = center(
+            f.area(),
+            Constraint::Percentage(100),
+            Constraint::Length(loading_height),
+        );
+
+        // Split the centered area for big text and subtitle
+        let content_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(8), // Height for big text
+                Constraint::Length(3), // Height for subtitle
+            ])
+            .split(centered_area);
+
+        f.render_widget(big_text, content_chunks[0]);
+        f.render_widget(subtitle, content_chunks[1]);
     }
 }
 
@@ -580,6 +591,7 @@ fn render_train_arrivals(f: &mut Frame, app: &App, area: ratatui::layout::Rect) 
             let inner_area = Block::default()
                 .borders(Borders::ALL)
                 .title("Upcoming Trains")
+                .padding(Padding::new(1, 1, 1, 1))
                 .inner(area);
 
             // Render the border
@@ -592,21 +604,19 @@ fn render_train_arrivals(f: &mut Frame, app: &App, area: ratatui::layout::Rect) 
             let big_text = BigText::builder()
                 .pixel_size(PixelSize::Quadrant)
                 .style(Style::default().fg(Color::Cyan))
-                .lines(big_text_lines)
-                .centered()
+                .lines(big_text_lines.clone())
+                .alignment(Alignment::Center)
                 .build();
 
-            // Center vertically by creating a layout with flexible space above and below
-            let vertical_chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Percentage(25), // Top padding
-                    Constraint::Min(0),         // Content area
-                    Constraint::Percentage(25), // Bottom padding
-                ])
-                .split(inner_area);
+            // Calculate height needed for BigText (Quadrant pixel size ~4 rows per line)
+            let text_height = (big_text_lines.len() as u16 * 4).min(inner_area.height);
+            let centered_area = center(
+                inner_area,
+                Constraint::Percentage(100),
+                Constraint::Length(text_height),
+            );
 
-            f.render_widget(big_text, vertical_chunks[1]);
+            f.render_widget(big_text, centered_area);
         }
     } else {
         let loading = Paragraph::new("Loading train data...")
@@ -619,7 +629,7 @@ fn render_train_arrivals(f: &mut Frame, app: &App, area: ratatui::layout::Rect) 
 fn render_bottom_bar(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     // Create the footer text with current rate
     let footer_text = format!(
-        "Rate: {}s | s: Switch Stop | +/-: Adjust Rate | Ctrl-L: Log | Ctrl-C: Quit",
+        "Rate: {}s | s: Switch Stop | +/-: Adjust Rate | Ctrl-C: Quit",
         app.polling_interval.as_secs()
     );
 
@@ -682,7 +692,7 @@ fn render_bottom_bar(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
 
 fn render_log(f: &mut Frame, app: &App) {
     let main_block = Block::default()
-        .title("Debug Log (from file) (L to enter, q/Esc/Ctrl-L to exit, Ctrl-C to quit)")
+        .title("Debug Log (from file) (l to enter, l to exit, Ctrl-C to quit)")
         .borders(Borders::ALL)
         .style(Style::default().fg(Color::White));
 
