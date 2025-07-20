@@ -4,7 +4,7 @@ use ratatui::{
     crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
     layout::{Alignment, Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
-    text::{Line, Span, Text},
+    text::{Line, Text},
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
 };
 
@@ -551,7 +551,8 @@ fn render_train_arrivals(f: &mut Frame, app: &App, area: ratatui::layout::Rect) 
                 .style(Style::default().fg(Color::Yellow));
             f.render_widget(no_trains, area);
         } else {
-            let mut lines = Vec::new();
+            // Format text lines for BigText display
+            let mut big_text_lines = Vec::new();
 
             for (route_id, arrivals) in &status.train_arrivals {
                 let route_display = arrivals
@@ -559,24 +560,58 @@ fn render_train_arrivals(f: &mut Frame, app: &App, area: ratatui::layout::Rect) 
                     .and_then(|a| a.route_name.as_ref())
                     .unwrap_or(route_id);
 
-                lines.push(Line::from(vec![Span::styled(
-                    format!("{} Train", route_display),
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                )]));
+                // Format as "G: in a minute, and 5 minutes."
+                let arrival_times: Vec<String> = arrivals
+                    .iter()
+                    .take(2)
+                    .map(|arrival| arrival.human_time.clone())
+                    .collect();
 
-                for (i, arrival) in arrivals.iter().take(2).enumerate() {
-                    lines.push(Line::from(format!("  {}: {}", i + 1, arrival.human_time)));
-                }
-                lines.push(Line::from(""));
+                let formatted_line = if arrival_times.len() == 1 {
+                    format!("{}: {}", route_display, arrival_times[0])
+                } else if arrival_times.len() == 2 {
+                    format!(
+                        "{}: {}, and {}",
+                        route_display, arrival_times[0], arrival_times[1]
+                    )
+                } else {
+                    format!("{}: No arrivals", route_display)
+                };
+
+                big_text_lines.push(formatted_line);
             }
 
-            let paragraph = Paragraph::new(lines)
-                .block(block)
-                .wrap(Wrap { trim: true })
-                .style(Style::default().fg(Color::White));
-            f.render_widget(paragraph, area);
+            // Create a content area inside the border
+            let inner_area = Block::default()
+                .borders(Borders::ALL)
+                .title("Upcoming Trains")
+                .inner(area);
+
+            // Render the border
+            f.render_widget(block, area);
+
+            // Create BigText with smaller pixel size
+            let big_text_lines: Vec<Line> =
+                big_text_lines.into_iter().map(|s| Line::from(s)).collect();
+
+            let big_text = BigText::builder()
+                .pixel_size(PixelSize::Sextant) // Smaller than Full but still large
+                .style(Style::default().fg(Color::Cyan))
+                .lines(big_text_lines)
+                .centered()
+                .build();
+
+            // Center vertically by creating a layout with flexible space above and below
+            let vertical_chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Percentage(25), // Top padding
+                    Constraint::Min(0),         // Content area
+                    Constraint::Percentage(25), // Bottom padding
+                ])
+                .split(inner_area);
+
+            f.render_widget(big_text, vertical_chunks[1]);
         }
     } else {
         let loading = Paragraph::new("Loading train data...")
