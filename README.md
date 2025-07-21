@@ -6,7 +6,7 @@ Build and run locally:
 `cargo build --bin train-checker-tui --release && ./target/release/train-checker-tui`
 
 Is most useful when run on a Raspberry Pi, or similar little machine:
-![IMG_9423](https://github.com/user-attachments/assets/6a97d233-2c2a-447a-985a-33dfe76d1f07)
+![IMG_9423](https://github.com/user-attachments/assets/1ef7a8bf-46ce-4c60-a754-953e56e656cd)
 
 Big text for the people in the way way back:
 <img width="897" height="698" alt="Screenshot 2025-07-20 at 8 01 57 PM" src="https://github.com/user-attachments/assets/10653601-def7-48a9-b8f2-2c73a868de23" />
