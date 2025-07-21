@@ -4,6 +4,7 @@ use prost::Message;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
+use tracing::warn;
 
 mod subway;
 use subway::FeedMessage;
@@ -260,11 +261,11 @@ impl TrainChecker {
                     feed_messages.push(feed);
                 }
                 Ok(Err(e)) => {
-                    eprintln!("Failed to fetch feed: {}", e);
+                    warn!("Failed to fetch feed: {}", e);
                     self.failed_requests.fetch_add(1, Ordering::Relaxed);
                 }
                 Err(e) => {
-                    eprintln!("Task failed: {}", e);
+                    warn!("Task failed: {}", e);
                     self.failed_requests.fetch_add(1, Ordering::Relaxed);
                 }
             }
@@ -427,7 +428,7 @@ impl StopMonitor {
         loop {
             match self.checker.get_stop_status(stop_id).await {
                 Ok(status) => callback(status),
-                Err(e) => eprintln!("Error getting stop status: {}", e),
+                Err(e) => warn!("Error getting stop status: {}", e),
             }
 
             tokio::time::sleep(self.config.update_interval).await;
