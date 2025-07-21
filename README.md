@@ -2,6 +2,9 @@ PROTOTYPE
 
 NOT PRODUCTION READY
 
+Build and run locally:
+`cargo build --bin train-checker-tui --release && ./target/release/train-checker-tui`
+
 Check train times for a single station direction.
 
 Big text for the people in the way way back:
