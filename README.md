@@ -1,6 +1,6 @@
 🚧 PROTOTYPE. NOT PRODUCTION READY. FOR FUN ONLY! 🚧
 
-# Check train arrival times for a single station direction.
+# Check train arrival times for a single MTA station direction.
 
 Build and run locally:
 `cargo build --bin train-checker-tui --release && ./target/release/train-checker-tui`
