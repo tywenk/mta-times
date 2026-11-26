@@ -2,6 +2,8 @@
 
 # Check train arrival times for a single MTA station direction.
 
+Requires a [Rust toolchain](https://rustup.rs/).
+
 Build and run locally:
 `cargo build --bin train-checker-tui --release && ./target/release/train-checker-tui`
 
